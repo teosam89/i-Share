@@ -265,7 +265,7 @@ not monitored.
 
 ## Author
 
-Teo Boon Shen, [zerofield.dev](https://zerofield.dev)
+Teo Boon Shen · [zerofield.dev](https://zerofield.dev) · case study: [zerofield.dev/projects/i-share](https://zerofield.dev/projects/i-share/)
 
 ## License
 
