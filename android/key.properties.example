@@ -1,0 +1,6 @@
+# Copy to android/key.properties (git-ignored) to build a signed release.
+# Without this file, release builds fall back to the debug signing key.
+storePassword=
+keyPassword=
+keyAlias=
+storeFile=

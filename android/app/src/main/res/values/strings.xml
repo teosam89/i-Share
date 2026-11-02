@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- uCrop strings override for English -->
+    <string name="ucrop_menu_crop">Done</string>
+    <string name="ucrop_label_original">Original</string>
+    <string name="ucrop_label_crop">Crop</string>
+    <string name="ucrop_label_rotate">Rotate</string>
+    <string name="ucrop_label_scale">Scale</string>
+    <string name="ucrop_rotate">Rotate</string>
+    <string name="ucrop_crop">Crop</string>
+</resources>

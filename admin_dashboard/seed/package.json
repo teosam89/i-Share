@@ -1,0 +1,19 @@
+{
+  "name": "admin-dashboard-seed",
+  "version": "1.0.0",
+  "description": "Seed and wipe scripts for the i-Share Admin Dashboard FYP demo data.",
+  "private": true,
+  "scripts": {
+    "seed": "ts-node seed.ts",
+    "wipe": "ts-node wipe.ts"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^9.0.0",
+    "firebase-admin": "^12.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  }
+}

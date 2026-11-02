@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.log
+
+# CRITICAL: never commit service account key — full admin access to your Firebase project
+service-account-key.json

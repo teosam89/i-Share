@@ -1,0 +1,41 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // 产品图片 — 5 MB 上限，仅图片格式
+    match /co_requests/{requestId}/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null &&
+        request.resource.size < 5 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/.*');
+    }
+    match /products/{requestId} {
+      allow read: if true;
+      allow write: if request.auth != null &&
+        request.resource.size < 5 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/.*');
+    }
+    
+    // 头像 — 3 MB 上限，只允许本人上传 .jpg / .png
+    match /avatars/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null &&
+        fileName.matches(request.auth.uid + '\\.(jpg|png)') &&
+        request.resource.size < 3 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/(jpeg|png)');
+    }
+    
+    // 聊天图片 — 8 MB 上限，仅图片格式
+    match /chat_images/{chatRoomId}/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null &&
+        request.resource.size < 8 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/.*');
+    }
+    
+    // APK 发布文件 - 公开下载，仅通过 Firebase Console 上传
+    match /releases/{fileName} {
+      allow read: if true;   // 任何人可下载
+      allow write: if false; // 仅通过 Firebase Console 管理
+    }
+  }
+}

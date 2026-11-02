@@ -1,0 +1,90 @@
+name: i_share
+description: "i-Share - A c2c mobile platform for coordinating bulk retail purchases"
+publish_to: 'none'
+
+version: 1.3.0+1
+
+environment:
+  sdk: ^3.10.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI Components
+  cupertino_icons: ^1.0.8
+  
+  # Firebase Core & Services
+  firebase_core: ^3.8.1
+  firebase_auth: ^5.3.4
+  cloud_firestore: ^5.5.2
+  cloud_functions: ^5.1.6
+  firebase_storage: ^12.3.8
+  firebase_messaging: ^15.1.8
+  firebase_analytics: ^11.3.8
+  
+  # Location & Maps
+  google_maps_flutter: ^2.10.0
+  geolocator: ^13.0.2
+  geocoding: ^3.0.0
+  
+  # Barcode Scanning
+  mobile_scanner: ^7.1.4
+  
+  # Image Handling
+  image_picker: ^1.2.1
+  cached_network_image: ^3.4.1
+  
+  # State Management
+  provider: ^6.1.2
+  
+  # UI & Utilities
+  intl: ^0.20.1
+  uuid: ^4.5.1
+  timeago: ^3.7.0
+  flutter_rating_bar: ^4.0.1
+  image_cropper: ^11.0.0
+  crop_your_image: ^2.0.0
+  qr_flutter: ^4.1.0
+  video_player: ^2.10.1
+  lottie: ^3.3.2
+  google_places_flutter: ^2.1.1
+  connectivity_plus: ^7.0.0
+  http: ^1.6.0
+  flutter_dotenv: ^5.2.1
+
+  path_provider: any
+  url_launcher: ^6.3.2
+  shared_preferences: ^2.5.4
+  app_settings: ^7.0.0
+  permission_handler: ^11.3.1
+  google_sign_in: ^7.2.0
+  package_info_plus: ^9.0.0
+
+  # FYP 2 — AI-driven UI testing (debug-only, guarded by kDebugMode)
+  flutter_skill: ^0.9.36
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
+
+flutter:
+  uses-material-design: true
+  
+  # Assets
+  assets:
+    - .env
+    - assets/images/
+    - assets/icons/
+
+# App Icon configuration
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: true
+  image_path: "assets/icons/app_icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icons/app_icon.png"
+  web:
+    generate: false

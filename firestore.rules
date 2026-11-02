@@ -1,0 +1,425 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function to check if user owns the document
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    // Helper function to check if user is an admin (FYP demo dashboard).
+    // Whitelist of UIDs that may read aggregated data via admin_dashboard/.
+    // SETUP: replace REPLACE_WITH_ADMIN_UID with the Firebase Auth UID(s) of your admin account(s)
+    // (Firebase Console > Authentication > Users), then deploy the rules.
+    // To revoke admin access: remove the UID from this list and redeploy rules.
+    // NOTE: this clause only grants READ. No admin write operations exist.
+    function isAdmin() {
+      return request.auth != null && request.auth.uid in [
+        'REPLACE_WITH_ADMIN_UID'
+      ];
+    }
+
+    // App Config collection (version check, feature flags)
+    // Public read — needed before user login for update check
+    match /app_config/{configId} {
+      allow read: if true;
+      allow write: if false; // Only managed via Firebase Console
+    }
+    
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId);
+      
+      // Remarks subcollection - personal notes about other users (only visible to owner)
+      match /remarks/{targetUserId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+    
+    // User Profiles collection
+    match /profiles/{userId} {
+      allow read: if isAuthenticated() || isAdmin();
+      allow create: if isOwner(userId);
+      // Profile owner can update their own editable fields.
+      // CF-managed credibility counters (rating, ratingCount, completedRequests,
+      // cancelledRequests) are blocked from direct client writes — they are
+      // updated exclusively by Cloud Functions via Admin SDK (which bypasses rules).
+      // score and verifications remain writable by owner for the verification flow
+      // in AuthProvider._awardVerificationScore.
+      allow update: if isOwner(userId) &&
+        !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['rating', 'ratingCount', 'completedRequests', 'cancelledRequests',
+            'totalRequests', 'totalJoined']);
+      allow delete: if isOwner(userId);
+      
+      // Ratings subcollection
+      match /ratings/{ratingId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated() && request.auth.uid != userId;
+        allow update, delete: if false; // Ratings cannot be modified
+      }
+      
+      // Score activities subcollection - credibility score change logs
+      match /score_activities/{activityId} {
+        allow read: if isAuthenticated() || isAdmin();
+        allow create: if isOwner(userId); // Only the profile owner can log their own activity
+        allow update, delete: if false; // Score activities are immutable
+      }
+      
+      // Remarks subcollection - personal notes about other users (only visible to owner)
+      match /remarks/{targetUserId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Notifications subcollection - in-app notification inbox (fallback for push)
+      match /notifications/{notificationId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId);
+        allow update: if isOwner(userId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+        allow delete: if false;
+      }
+    }
+
+    // Co-Requests collection
+    match /co_requests/{requestId} {
+      allow read: if isAuthenticated() || isAdmin();
+      allow create: if isAuthenticated();
+      
+      // Helper: Check if status transition is valid (forward only)
+      function isValidStatusTransition() {
+        let oldStatus = resource.data.status;
+        let newStatus = request.resource.data.status;
+        // Allow: active→completed, active→expired, active→cancelled
+        // Allow: expired→active (initiator extends request)
+        // Disallow: any other reverse transition
+        return oldStatus == newStatus || // No change
+          (oldStatus == 'active' && newStatus in ['completed', 'expired', 'cancelled']) ||
+          (oldStatus == 'expired' && newStatus == 'active');
+      }
+      
+      // Helper: Check immutable fields
+      function areImmutableFieldsUnchanged() {
+        return request.resource.data.initiatorId == resource.data.initiatorId &&
+               request.resource.data.createdAt == resource.data.createdAt;
+      }
+      
+      // SECURITY: Only initiator can update, with validation
+      // Price edits are allowed even with participants — members are notified via chat
+      // Exception: Participants can remove themselves from cancelled requests
+      allow update: if isAuthenticated() && (
+        // Owner can update with validation
+        (resource.data.initiatorId == request.auth.uid &&
+         isValidStatusTransition() &&
+         areImmutableFieldsUnchanged()) ||
+        // Participant can remove self from cancelled request (only participants field change allowed)
+        (resource.data.status == 'cancelled' &&
+         request.auth.uid in resource.data.participants &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participants']))
+      );
+      
+      allow delete: if isAuthenticated() && 
+        resource.data.initiatorId == request.auth.uid;
+      
+      // Join Requests subcollection
+      match /join_requests/{joinId} {
+        // Any authenticated user can read (client filters by requesterId/hostId)
+        allow read: if isAuthenticated();
+        // Anyone authenticated can create a join request
+        allow create: if isAuthenticated();
+        // Only Host can update (accept/reject)
+        allow update: if isAuthenticated() && 
+          request.auth.uid == resource.data.hostId;
+        // Only Requester can delete (cancel)
+        allow delete: if isAuthenticated() && 
+          request.auth.uid == resource.data.requesterId;
+      }
+    }
+    
+    // ============================================================
+    // Chat Rooms Collection - Handles 3 types of chat rooms:
+    // 1. DM (Direct Message): Format "dm_userId1_userId2"
+    // 2. Co-Buy Request: Format "{requestId}" (matches co_requests doc ID)
+    // 3. Real-Time Match: Format "rtm_{matchId}"
+    // ============================================================
+    match /chat_rooms/{chatRoomId} {
+      
+      // ==================== HELPER FUNCTIONS ====================
+      
+      // Check if this is a DM room format
+      function isDmRoom() {
+        return chatRoomId.matches('dm_[a-zA-Z0-9]+_[a-zA-Z0-9]+');
+      }
+      
+      // Check if this is an RTM room format
+      function isRtmRoom() {
+        return chatRoomId.matches('rtm_.*');
+      }
+      
+      // Check if this is a Co-Buy room (not DM, not RTM)
+      function isCoBuyRoom() {
+        return !isDmRoom() && !isRtmRoom();
+      }
+      
+      // USER PERSPECTIVE: "Can I access this DM?"
+      // DM rooms: User ID must be in the room ID (dm_user1_user2)
+      function isDmParticipant() {
+        let parts = chatRoomId.split('_');
+        return isDmRoom() &&
+               parts.size() == 3 &&
+               (parts[1] == request.auth.uid || parts[2] == request.auth.uid);
+      }
+      
+      // USER PERSPECTIVE: "Am I in this chat's participant list?"
+      function isChatParticipant() {
+        return resource.data.participantIds != null && 
+               request.auth.uid in resource.data.participantIds;
+      }
+      
+      // USER PERSPECTIVE: "Did I create this Co-Buy request?"
+      function isCoBuyInitiator() {
+        return isCoBuyRoom() &&
+               exists(/databases/$(database)/documents/co_requests/$(chatRoomId)) &&
+               get(/databases/$(database)/documents/co_requests/$(chatRoomId)).data.initiatorId == request.auth.uid;
+      }
+      
+      // USER PERSPECTIVE: "Did I create this Real-Time Match?"
+      function isRtmOwner() {
+        let matchId = chatRoomId.replace('rtm_', '');
+        return isRtmRoom() &&
+               exists(/databases/$(database)/documents/realtime_matches/$(matchId)) &&
+               get(/databases/$(database)/documents/realtime_matches/$(matchId)).data.ownerId == request.auth.uid;
+      }
+      
+      // USER PERSPECTIVE: "Am I a participant in this Real-Time Match?"
+      function isRtmParticipant() {
+        let matchId = chatRoomId.replace('rtm_', '');
+        return isRtmRoom() &&
+               exists(/databases/$(database)/documents/realtime_matches/$(matchId)) &&
+               request.auth.uid in get(/databases/$(database)/documents/realtime_matches/$(matchId)).data.participants;
+      }
+      
+      // ==================== READ RULES ====================
+      // USER PERSPECTIVE: "Can I see this chat room?"
+      //
+      // list (collection query) — Firestore cannot evaluate get() calls during
+      // query planning, so we use only isChatParticipant() which is implied by
+      // the client query `where('participantIds', arrayContains: uid)`.
+      // This allows the getUserChatRooms() stream to work for new users with 0 chats.
+      allow list: if isAuthenticated() && isChatParticipant();
+
+      // get (single document read) — full type-aware check
+      // - DM: Only if I'm one of the two users in the room ID
+      // - Co-Buy: Only if I'm the initiator OR in participantIds
+      // - RTM: Only if I'm the match owner OR in match participants
+      allow get: if isAuthenticated() && (
+        isDmParticipant() ||
+        isChatParticipant() ||
+        isCoBuyInitiator() ||
+        isRtmOwner() ||
+        isRtmParticipant()
+      );
+      
+      // ==================== CREATE RULES ====================
+      // USER PERSPECTIVE: "Can I start this chat room?"
+      // - I must be listed in the initial participantIds
+      // - For DM: I must be one of the users in the room ID
+      // - For RTM: I must be the match owner (creating room when match is created)
+      allow create: if isAuthenticated() && 
+        request.resource.data.participantIds != null &&
+        request.auth.uid in request.resource.data.participantIds && (
+          // DM: I must be in the room ID
+          (isDmRoom() && isDmParticipant()) ||
+          // Co-Buy: I must be creating for my own request
+          (isCoBuyRoom()) ||
+          // RTM: Anyone joining/creating match can create
+          (isRtmRoom())
+        );
+      
+      // ==================== UPDATE RULES ====================
+      // USER PERSPECTIVE: "Can I modify this chat room?"
+      // Updates include: sending messages (lastMessage), adding participants, hiding chat
+      allow update: if isAuthenticated() && (
+        // DM: Only participants can update
+        isDmParticipant() ||
+        
+        // Already a participant: can update lastMessage, hiddenBy
+        isChatParticipant() ||
+        
+        // Co-Buy initiator: full control
+        isCoBuyInitiator() ||
+        
+        // RTM owner: full control
+        isRtmOwner() ||
+        
+        // RTM participant: can update
+        isRtmParticipant() ||
+        
+        // RTM: User joining match can add themselves to participantIds
+        (isRtmRoom() &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['participantIds', 'lastMessage', 'lastMessageAt']) &&
+         request.auth.uid in request.resource.data.participantIds)
+      );
+      
+      // ==================== DELETE RULES ====================
+      // USER PERSPECTIVE: "Can I delete this chat room?"
+      // - Generally NO for regular users (preserve history)
+      // - Co-Buy initiator can delete their chat
+      // - RTM owner can delete their chat
+      // - Orphaned RTM rooms (match deleted) can be cleaned up
+      allow delete: if isAuthenticated() && (
+        // Co-Buy: Only initiator can delete
+        isCoBuyInitiator() ||
+        
+        // RTM: Owner can delete
+        isRtmOwner() ||
+        
+        // RTM orphan cleanup: If match no longer exists, participants can delete
+        (isRtmRoom() && 
+         !exists(/databases/$(database)/documents/realtime_matches/$(chatRoomId.replace('rtm_', ''))) &&
+         isChatParticipant())
+      );
+      
+      // ==================== MESSAGES SUBCOLLECTION ====================
+      // USER PERSPECTIVE: "Can I read/send messages in this chat?"
+      match /messages/{messageId} {
+        
+        // Check if user can access this chat's messages
+        function canAccessMessages() {
+          return isDmParticipant() ||
+            request.auth.uid in get(/databases/$(database)/documents/chat_rooms/$(chatRoomId)).data.participantIds;
+        }
+        
+        // USER PERSPECTIVE: "Can I see messages?"
+        // - Only if I'm a participant in this chat
+        allow read: if isAuthenticated() && canAccessMessages();
+        
+        // USER PERSPECTIVE: "Can I send a message?"
+        // - Only if I'm a participant
+        // - For security: senderId must be my own ID
+        allow create: if isAuthenticated() && 
+          canAccessMessages() &&
+          request.resource.data.senderId == request.auth.uid;
+        
+        // USER PERSPECTIVE: "Can I mark messages as read or recall my own?"
+        // 1. Mark as read: only for messages NOT sent by me, only isRead field
+        // 2. Recall: only for messages sent by me, only content+type fields
+        allow update: if isAuthenticated() &&
+          canAccessMessages() && (
+          // Mark as read (other people's messages)
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']) &&
+           resource.data.senderId != request.auth.uid) ||
+          // Recall own message (sender can update content + type)
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['content', 'type']) &&
+           resource.data.senderId == request.auth.uid)
+        );
+          
+        // Messages cannot be deleted (preserve conversation history)
+        allow delete: if false;
+      }
+    }
+
+    // Collection Group query rule for join_requests
+    // This allows queries like collectionGroup('join_requests').where('hostId', ==, uid)
+    match /{path=**}/join_requests/{joinId} {
+      allow read: if isAuthenticated() && (
+        resource.data.hostId == request.auth.uid ||
+        resource.data.requesterId == request.auth.uid
+      );
+    }
+
+    // NOTE: A previous collection-group rule `match /{path=**}/messages` granted
+    // any authenticated non-sender read access to every message, which (because
+    // Firestore OR-combines matching rules) bypassed the participant check on
+    // single-document reads — a confidentiality defect found by integration test
+    // IT-CHAT-02 (Section 4.1.2). No client/CF code issues a collectionGroup
+    // ('messages') query (the unread badge uses per-room lastReadAt/lastMessageAt),
+    // so the rule was removed. Message reads are now governed solely by the
+    // participant-scoped rule inside /chat_rooms/{chatRoomId}/messages above.
+
+    // Collection Group query rule for score_activities (admin dashboard only)
+    // Enables the admin dashboard to aggregate credibility events across all users.
+    // Regular users still read individual activities via the per-profile rule above.
+    match /{path=**}/score_activities/{activityId} {
+      allow read: if isAdmin();
+    }
+
+    // Real-Time Matches collection
+    match /realtime_matches/{matchId} {
+      allow read: if isAuthenticated() || isAdmin();
+      allow create: if isAuthenticated();
+      
+      // Helper: Check immutable fields
+      function areMatchImmutableFieldsUnchanged() {
+        return request.resource.data.createdAt == resource.data.createdAt &&
+               request.resource.data.expiresAt == resource.data.expiresAt &&
+               request.resource.data.ownerId == resource.data.ownerId;
+      }
+      
+      // Helper: Valid status transition (waiting→matched→closed)
+      function isValidMatchStatusTransition() {
+        let oldStatus = resource.data.status;
+        let newStatus = request.resource.data.status;
+        return oldStatus == newStatus || // No change
+          (oldStatus == 'waiting' && newStatus in ['matched', 'closed']) ||
+          (oldStatus == 'matched' && newStatus == 'closed');
+      }
+      
+      // Owner or existing participants can update (with validation)
+      // New users can add themselves (for joining) or skip rooms
+      allow update: if isAuthenticated() &&
+        areMatchImmutableFieldsUnchanged() &&
+        isValidMatchStatusTransition() && (
+          // Owner can update (except immutable fields)
+          resource.data.ownerId == request.auth.uid ||
+          // Existing participants can update
+          (resource.data.participants != null && request.auth.uid in resource.data.participants) ||
+          // Allow user to join: adds self to participants + participantIntents, may change status
+          (request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['participants', 'participantIntents', 'status']) &&
+           request.auth.uid in request.resource.data.participants) ||
+          // Allow any authenticated user to skip a room (only skippedBy field)
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['skippedBy']))
+        );
+        
+      // Only owner can delete
+      allow delete: if isAuthenticated() && 
+        resource.data.ownerId == request.auth.uid;
+    }
+
+    // QR Verifications collection
+    match /qr_verifications/{requestId} {
+      // Any authenticated user can read (to check verification status)
+      allow read: if isAuthenticated() || isAdmin();
+      
+      // Only request initiator can create verification session
+      allow create: if isAuthenticated() && 
+        exists(/databases/$(database)/documents/co_requests/$(requestId)) &&
+        get(/databases/$(database)/documents/co_requests/$(requestId)).data.initiatorId == request.auth.uid;
+      
+      // Allow participants to update (add themselves to verifiedIds)
+      // Or initiator to manage
+      allow update: if isAuthenticated() && 
+        exists(/databases/$(database)/documents/co_requests/$(requestId)) && (
+          // Initiator can do anything
+          get(/databases/$(database)/documents/co_requests/$(requestId)).data.initiatorId == request.auth.uid ||
+          // Participants can only update verifiedIds field (by adding themselves)
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['verifiedIds']) &&
+           request.auth.uid in resource.data.participantIds)
+        );
+      
+      // Only initiator can delete
+      allow delete: if isAuthenticated() && 
+        exists(/databases/$(database)/documents/co_requests/$(requestId)) &&
+        get(/databases/$(database)/documents/co_requests/$(requestId)).data.initiatorId == request.auth.uid;
+    }
+  }
+}
